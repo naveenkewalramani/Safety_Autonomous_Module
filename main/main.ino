@@ -3,6 +3,8 @@
 #include<dht.h>
 #include <MQ2.h>
 dht DHT;
+SoftwareSerial GPRS(7, 8);
+
 //pin declaration'
 const int zpin = A0; // z-axis
 const int ypin = A1; // y-axis
@@ -41,8 +43,8 @@ float ratio; //Get ratio RS_GAS/RS_air
 void setup() {
   
   pinMode(4,OUTPUT);
-  Serial.begin(9600);
   mq2.begin();
+  
   //RGB led work(PENDING)
   pinMode(9, OUTPUT); //Red
   pinMode(10, OUTPUT); // Ground
@@ -52,10 +54,16 @@ void setup() {
   digitalWrite(10, LOW);
   digitalWrite(11, HIGH);
   digitalWrite(12, LOW);
+
+  GPRS.begin(9600);
+  Serial.begin(9600);
+  GPRS.println("AT+CMGF=1");
 }
 
 void loop() {
-    
+    while(GPRS.available()) {
+    Serial.write(GPRS.read());
+  }
     //Taking input from sensors
     Xval = (analogRead(xpin)- xZero)/102;
     Yval = (analogRead(ypin) - yZero)/102;
@@ -95,8 +103,11 @@ void loop() {
     //Calculation for hall Effect
     
     //Threshold
-    if(temp>=30.00 or humid<=40.00)
+    if(temp>=30.00 or humid<=40.00){
       digitalWrite(4,HIGH);
+       sendSMS();
+    }
+    
     else
       digitalWrite(4,LOW);
     //Printing 
@@ -242,4 +253,15 @@ void fall_detect()
           digitalWrite(12, LOW);
       }
     }
+}
+void sendSMS() {
+  Serial.println("ALERT ");
+  GPRS.println("AT+CMGS=\"+918052896807\"");
+  
+  delay(500);
+  
+  GPRS.print("ALERT");
+  GPRS.write( 0x1a ); // ctrl+Z character
+  
+  delay(500);
 }
