@@ -1,20 +1,17 @@
 //library included
 #include <SoftwareSerial.h>
 #include<dht.h>
-#include <MQ2.h>
-//#include <LiquidCrystal.h>
 dht DHT;
 SoftwareSerial GPRS(6,7);
-//LiquidCrystal lcd(8,9,10,11,12,13);
+
 //pin declaration'
 const int zpin = A0; // z-axis
 const int ypin = A1; // y-axis
 const int xpin = A2; // x-axis
 const int Hallpin = A3; //Hall  sensor
 #define DHT11_PIN A4
-const int mq2pin = A5; // gas sensor
+const int mq_pin=A5;  // gas sensor
 
-MQ2 mq2(mq2pin);
 float Xval=0.0, Yval=0.0, Zval=0.0,Hallval=0.0;//for accelerometer
 float Anet=0.0, pitch=0.0, roll=0.0;
 
@@ -24,18 +21,35 @@ int TYPE = 0;
 float xZero = 0;
 float yZero = 0;
 float zZero = 0;
-
-//for gas sensor
-int LPG,CO,SMOKE;
-float sensor_volt;
-float RS_air; //get value of Rs in GAS
-float R0;
-float ratio; //Get ratio RS_GAS/RS_air
+                           
+int RL_VALUE=5;                                     //define the load resistance on the board, in kilo ohms
+float RO_CLEAN_AIR_FACTOR=9.83;                     //RO_CLEAR_AIR_FACTOR=(Sensor resistance in clean air)/RO,//which is derived from the chart in datasheet
+int CALIBARAION_SAMPLE_TIMES=10;                    //define how many samples you are going to take in the calibration phase
+int CALIBRATION_SAMPLE_INTERVAL=200;                //define the time interal(in milisecond) between each samples in the//cablibration phase
+int READ_SAMPLE_INTERVAL=10;                        //define how many samples you are going to take in normal operation
+int READ_SAMPLE_TIMES=5;                            //define the time interal(in milisecond) between each samples in //normal operation
+#define         GAS_LPG             0   
+#define         GAS_CO              1   
+#define         GAS_SMOKE           2    
+float           LPGCurve[3]  =  {2.3,0.21,-0.47};   //two points are taken from the curve. 
+                                                    //with these two points, a line is formed which is "approximately equivalent"
+                                                    //to the original curve. 
+                                                    //data format:{ x, y, slope}; point1: (lg200, 0.21), point2: (lg10000, -0.59) 
+float           COCurve[3]  =  {2.3,0.72,-0.34};    //two points are taken from the curve. 
+                                                    //with these two points, a line is formed which is "approximately equivalent" 
+                                                    //to the original curve.
+                                                    //data format:{ x, y, slope}; point1: (lg200, 0.72), point2: (lg10000,  0.15) 
+float           SmokeCurve[3] ={2.3,0.53,-0.44};    //two points are taken from the curve. 
+                                                    //with these two points, a line is formed which is "approximately equivalent" 
+                                                    //to the original curve.
+                                                    //data format:{ x, y, slope}; point1: (lg200, 0.53), point2: (lg10000,  -0.22)                                                     
+float           Ro           =  10;                 //Ro is initialized to 10 kilo ohm
 
 void setup() {
-  //lcd.begin(16, 2);
+  Serial.begin(9600);
   pinMode(13,OUTPUT);
-  mq2.begin();
+  delay(1000);
+  Ro = MQCalibration(mq_pin);                         //Calibrating the sensor. Please make sure the sensor is in clean air
   
   //RGB led work(PENDING)
   pinMode(2, OUTPUT); //Red
@@ -46,10 +60,8 @@ void setup() {
   digitalWrite(3, LOW);
   digitalWrite(4, LOW);
   digitalWrite(5, LOW);
-
-  digitalWrite(4,LOW);
   GPRS.begin(9600);
-  Serial.begin(9600);
+  Serial.println("CALIBRATING");
   GPRS.println("AT+CMGF=1");
 }
 
@@ -57,9 +69,7 @@ void loop() {
     while(GPRS.available()) {
     Serial.write(GPRS.read());
   }
-  //lcd.setCursor(0,0);    
-  //lcd.print("dfggg");
-  delay(2000);
+  delay(1000);
     //Taking input from sensors
     Xval = (analogRead(xpin)- xZero)/1024;
     Yval = (analogRead(ypin) - yZero)/1024;
@@ -85,18 +95,12 @@ void loop() {
     float Rankine = (Kelvin*9)/5;  
     
     //Calculations for Mq2
-    LPG = mq2.readLPG();
-    CO = mq2.readCO();
-    SMOKE = mq2.readSmoke();
-    float sensorValue=0.0;
-    for(int x=0;x<100;x++){
-      sensorValue = sensorValue + mq2pin;
-    }
-    sensorValue = sensorValue/100.0;
-    sensor_volt = (float)sensorValue/1024*5.0;
-    RS_air = (5.0 -sensor_volt)/sensor_volt;
-    R0 = RS_air/9.8;
-    ratio = RS_air/R0;
+    long LPG = 0;
+    long CO = 0;
+    long SMOKE = 0;
+    LPG = MQGetGasPercentage(MQRead(mq_pin)/Ro,GAS_LPG);
+    CO = MQGetGasPercentage(MQRead(mq_pin)/Ro,GAS_CO);
+    SMOKE = MQGetGasPercentage(MQRead(mq_pin)/Ro,GAS_SMOKE);
     
     //Threshold
     if(temp>=30.00 or(humid<=40.00 and humid>=0.0)){
@@ -104,12 +108,12 @@ void loop() {
       digitalWrite(13,HIGH);
       digitalWrite(2,HIGH);
       sendSMS();
-    }else if(Anet>0.8){
+    }else if(Anet>0.78){
       TYPE=2;
       digitalWrite(13,HIGH);
       digitalWrite(3,HIGH);
       sendSMS();
-    }else if(SMOKE>=1 or LPG>=1 or CO>=1){
+    }else if(SMOKE>=20 or LPG>=50 or CO>=15){
       TYPE=3;
       digitalWrite(13,HIGH);
       digitalWrite(4,HIGH);
@@ -183,4 +187,52 @@ void sendSMS() {
   GPRS.write( 0x1a ); // ctrl+Z character
   
   delay(500);
+}
+float MQResistanceCalculation(int raw_adc)
+{
+  return ( ((float)RL_VALUE*(1023-raw_adc)/raw_adc));
+}
+float MQCalibration(int mq_pin)
+{
+  int i;
+  float val=0;
+
+  for (i=0;i<CALIBARAION_SAMPLE_TIMES;i++) {            //take multiple samples
+    val += MQResistanceCalculation(analogRead(mq_pin));
+    delay(CALIBRATION_SAMPLE_INTERVAL);
+  }
+  val = val/CALIBARAION_SAMPLE_TIMES;                   //calculate the average value
+  val = val/RO_CLEAN_AIR_FACTOR;                        //divided by RO_CLEAN_AIR_FACTOR yields the Ro                                        
+  return val;                                                      //according to the chart in the datasheet 
+
+} 
+float MQRead(int mq_pin)
+{
+  int i;
+  float rs=0;
+ 
+  for (i=0;i<READ_SAMPLE_TIMES;i++) {
+    rs += MQResistanceCalculation(analogRead(mq_pin));
+    delay(READ_SAMPLE_INTERVAL);
+  }
+ 
+  rs = rs/READ_SAMPLE_TIMES;
+ 
+  return rs;  
+}
+long MQGetGasPercentage(float rs_ro_ratio, int gas_id)
+{
+  if ( gas_id == GAS_LPG ) {
+     return MQGetPercentage(rs_ro_ratio,LPGCurve);
+  } else if ( gas_id == GAS_CO ) {
+     return MQGetPercentage(rs_ro_ratio,COCurve);
+  } else if ( gas_id == GAS_SMOKE ) {
+     return MQGetPercentage(rs_ro_ratio,SmokeCurve);
+  }    
+ 
+  return 0;
+}
+long  MQGetPercentage(float rs_ro_ratio, float *pcurve)
+{
+  return (pow(10,( ((log(rs_ro_ratio)-pcurve[1])/pcurve[2]) + pcurve[0])));
 }
